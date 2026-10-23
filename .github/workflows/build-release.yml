@@ -1,0 +1,93 @@
+name: Build e Criar Release
+
+'on':
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag da Versão (ex: v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+      release_name:
+        description: 'Título da Release'
+        required: false
+        default: 'Conversor QRP para PDF v1.0.0'
+      draft:
+        description: 'Criar como rascunho (Draft)?'
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: 'Marcar como Pré-release?'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Compilar Executável Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Baixar código do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Instalar dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Compilar aplicativo com PyInstaller
+        run: |
+          pyinstaller --noconsole --onefile --clean --collect-all customtkinter --name "ConversorQRP" main.py
+
+      - name: Verificar executável gerado
+        shell: pwsh
+        run: |
+          if (Test-Path "dist\ConversorQRP.exe") {
+            $size = (Get-Item "dist\ConversorQRP.exe").Length
+            Write-Host "Executável gerado com sucesso! Tamanho: $size bytes"
+          } else {
+            Write-Error "Arquivo dist\ConversorQRP.exe não encontrado!"
+            exit 1
+          }
+
+      - name: Criar pacote ZIP para download
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\ConversorQRP.exe", "README.md" -DestinationPath "dist\ConversorQRP-Windows-x64.zip"
+
+      - name: Armazenar artefato de compilação
+        uses: actions/upload-artifact@v4
+        with:
+          name: ConversorQRP-Windows
+          path: |
+            dist/ConversorQRP.exe
+            dist/ConversorQRP-Windows-x64.zip
+          retention-days: 14
+
+      - name: Publicar Release no GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          name: ${{ inputs.release_name || github.ref_name }}
+          draft: ${{ inputs.draft || false }}
+          prerelease: ${{ inputs.prerelease || false }}
+          generate_release_notes: true
+          files: |
+            dist/ConversorQRP.exe
+            dist/ConversorQRP-Windows-x64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# PyInstaller / Build
+build/
+dist/
+*.spec
+
+# Test files & logs
+*.log
+*.emf
+*.wmf
+*.qrp
+*.QRP
+test_out.pdf
+multipage_test.pdf
+
+# IDE & OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
