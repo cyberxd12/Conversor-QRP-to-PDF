@@ -44,24 +44,7 @@ python main.py
 
 ## 📦 Como Gerar o Executável Standalone (.exe)
 
-### Opção 1: Compilação Automática no GitHub (Releases)
-O repositório possui uma **GitHub Action** configurada em `.github/workflows/build-release.yml` que compila o executável automaticamente e anexa na aba **Releases** do GitHub:
-
-1. **Via Git Tag**:
-   ```bash
-   git tag v1.0.0
-   git push origin v1.0.0
-   ```
-2. **Manualmente pela interface do GitHub**:
-   - Vá na aba **Actions** no GitHub.
-   - Selecione a workflow **"Build e Criar Release"**.
-   - Clique em **"Run workflow"** e informe a versão desejada.
-
-Ao finalizar, a Action disponibiliza:
-- `ConversorQRP.exe` (Executável direto)
-- `ConversorQRP-Windows-x64.zip` (Pacote zip com executável e documentação)
-
-### Opção 2: Compilação Local
+### Opção 1: Compilação Local
 Dê um duplo clique no script [compilar_executavel.bat](file:///c:/Users/luis.suporte/Documents/programação/conversor/compilar_executavel.bat). O arquivo será gerado em `dist\ConversorQRP.exe`.
 
 ---
