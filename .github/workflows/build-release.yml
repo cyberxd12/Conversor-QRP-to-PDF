@@ -51,7 +51,7 @@ jobs:
 
       - name: Compilar aplicativo com PyInstaller
         run: |
-          pyinstaller --noconsole --onefile --clean --collect-all customtkinter --name "ConversorQRP" main.py
+          pyinstaller --noconsole --onefile --clean --collect-all customtkinter --collect-all reportlab --name "ConversorQRP" main.py
 
       - name: Verificar executável gerado
         shell: pwsh

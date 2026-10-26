@@ -6,10 +6,10 @@ echo   Compilando Conversor QRP para PDF em Executavel (.exe)
 echo ============================================================
 echo.
 echo Verificando PyInstaller...
-pip install pyinstaller customtkinter pillow pypdf --quiet
+pip install pyinstaller customtkinter pillow pypdf reportlab --quiet
 echo.
 echo Gerando executavel standalone...
-pyinstaller --noconsole --onefile --clean --collect-all customtkinter --name "ConversorQRP" main.py
+pyinstaller --noconsole --onefile --clean --collect-all customtkinter --collect-all reportlab --name "ConversorQRP" main.py
 
 echo.
 if exist "dist\ConversorQRP.exe" (
