@@ -17,7 +17,7 @@ _DEFAULT_FONT = "Helvetica"
 
 def _ensure_reportlab_fonts() -> str:
     """
-    Inicializa fontes do ReportLab registrando Arial TrueType do Windows.
+    Inicializa fontes do ReportLab registrando Arial TrueType do Windows (Regular e Negrito).
     Garante suporte nativo completo e preciso a caracteres UTF-8 e acentuação em português (ex: ã, é, ç, ê, etc.).
     """
     global _FONT_INITIALIZED, _DEFAULT_FONT
@@ -29,17 +29,38 @@ def _ensure_reportlab_fonts() -> str:
         from reportlab.pdfbase.ttfonts import TTFont
 
         win_dir = os.environ.get("WINDIR", r"C:\Windows")
-        arial_path = os.path.join(win_dir, "Fonts", "arial.ttf")
+        fonts_dir = os.path.join(win_dir, "Fonts")
+        arial_path = os.path.join(fonts_dir, "arial.ttf")
+        arialbd_path = os.path.join(fonts_dir, "arialbd.ttf")
+
         if os.path.isfile(arial_path):
             pdfmetrics.registerFont(TTFont("Arial", arial_path))
             _DEFAULT_FONT = "Arial"
         else:
             _DEFAULT_FONT = "Helvetica"
+
+        if os.path.isfile(arialbd_path):
+            pdfmetrics.registerFont(TTFont("Arial-Bold", arialbd_path))
     except Exception:
         _DEFAULT_FONT = "Helvetica"
 
     _FONT_INITIALIZED = True
     return _DEFAULT_FONT
+
+
+def _get_font_name(weight: int = 400) -> str:
+    """Retorna o nome da fonte correspondente ao peso (regular ou negrito)."""
+    base = _ensure_reportlab_fonts()
+    if base == "Arial":
+        if weight >= 700:
+            try:
+                from reportlab.pdfbase import pdfmetrics
+                pdfmetrics.getFont("Arial-Bold")
+                return "Arial-Bold"
+            except Exception:
+                return "Arial"
+        return "Arial"
+    return "Helvetica-Bold" if weight >= 700 else "Helvetica"
 
 
 class QRPConversionError(Exception):
@@ -129,18 +150,33 @@ class QRPConverter:
         - EMR_EXTTEXTOUTA (0x53 / 83 - texto ANSI Windows-1252)
         - EMR_SMALLTEXTOUT (0x6C / 108)
         - EMR_POLYTEXTOUTW (0x56 / 86) e EMR_POLYTEXTOUTA (0x55 / 85)
+        - EMR_EXTCREATEFONTINDIRECTW (0x52 / 82) e EMR_CREATEFONTINDIRECT (0x45 / 69)
+        - EMR_SETTEXTALIGN (0x16 / 22)
         
-        Extrai com precisão a caixa delimitadora (rclBounds) e espaçamentos (Dx) de cada palavra/linha.
+        Calcula com precisão as coordenadas de referência lógicas (ptlReference), alinhamento (TA_LEFT, TA_RIGHT, TA_CENTER, TA_BASELINE),
+        largura métrica de caracteres (Dx) e caixas delimitadoras no espaço de coordenadas do EMF.
+        
         Retorna:
-        - canvas_size: tupla (orig_w, orig_h)
-        - items: lista de dicionários contendo {'text', 'left', 'top', 'w_logical', 'h_logical'}.
+        - canvas_dim: tupla (logical_w, logical_h)
+        - items: lista de dicionários contendo metadados tipográficos e geométricos.
         """
+        # 1. Lê a caixa delimitadora do cabeçalho EMF
+        x0, y0, x1, y1 = 0, 0, 800, 1100
+        if len(emf_bytes) >= 24:
+            try:
+                h_x0, h_y0, h_x1, h_y1 = struct.unpack("<4i", emf_bytes[8:24])
+                if h_x1 > h_x0 and h_y1 > h_y0:
+                    x0, y0, x1, y1 = h_x0, h_y0, h_x1, h_y1
+            except Exception:
+                pass
+
         im = None
+        im_w, im_h = 800, 1100
         try:
             im = Image.open(io.BytesIO(emf_bytes))
-            orig_w, orig_h = im.size
+            im_w, im_h = im.size
         except Exception:
-            orig_w, orig_h = 800, 1100
+            im_w, im_h = max(1, x1), max(1, y1)
         finally:
             if im:
                 try:
@@ -148,9 +184,15 @@ class QRPConverter:
                 except Exception:
                     pass
 
+        # No Windows GDI (PlayEnhMetaFile), o canvas é posicionado a partir de (0,0)
+        # e suas dimensões totais correspondem à largura e altura máximas do metafile
+        logical_w = max(x1, im_w)
+        logical_h = max(y1, im_h)
+
         fonts: Dict[int, Dict[str, Any]] = {}
         active_font: Dict[str, Any] = {"height": 14, "name": "Arial", "weight": 400}
-        items: List[Dict[str, Any]] = []
+        active_text_align: int = 0
+        raw_items: List[Dict[str, Any]] = []
 
         pos = 0
         file_len = len(emf_bytes)
@@ -161,32 +203,47 @@ class QRPConverter:
                 break
             rec_data = emf_bytes[pos:pos + rec_size]
 
-            # 1. Criação de Fonte: EMR_EXTCREATEFONTINDIRECTW (82)
+            # 1. Criação de Fonte Unicode: EMR_EXTCREATEFONTINDIRECTW (82)
             if rec_type == 82 and len(rec_data) >= 104:
                 ih_font = struct.unpack("<I", rec_data[8:12])[0]
                 lf_height = abs(struct.unpack("<i", rec_data[12:16])[0])
                 lf_weight = struct.unpack("<i", rec_data[28:32])[0]
-                face = rec_data[40:104].decode("utf-16le", errors="ignore").rstrip("\x00")
+                face = rec_data[40:104].decode("utf-16le", errors="ignore").split("\x00", 1)[0]
                 fonts[ih_font] = {
                     "height": lf_height if lf_height > 0 else 14,
                     "weight": lf_weight,
                     "name": face or "Arial"
                 }
 
-            # 2. Seleção de Objeto: EMR_SELECTOBJECT (37)
+            # 2. Criação de Fonte ANSI (Delphi 7 e QuickReport clássico): EMR_CREATEFONTINDIRECT (69)
+            elif rec_type == 69 and len(rec_data) >= 72:
+                ih_font = struct.unpack("<I", rec_data[8:12])[0]
+                lf_height = abs(struct.unpack("<i", rec_data[12:16])[0])
+                lf_weight = struct.unpack("<i", rec_data[28:32])[0]
+                face = rec_data[40:72].decode("cp1252", errors="ignore").split("\x00", 1)[0]
+                fonts[ih_font] = {
+                    "height": lf_height if lf_height > 0 else 14,
+                    "weight": lf_weight,
+                    "name": face or "Arial"
+                }
+
+            # 3. Alinhamento de Texto: EMR_SETTEXTALIGN (22)
+            elif rec_type == 22 and len(rec_data) >= 12:
+                active_text_align = struct.unpack("<I", rec_data[8:12])[0]
+
+            # 4. Seleção de Objeto: EMR_SELECTOBJECT (37)
             elif rec_type == 37 and len(rec_data) >= 12:
                 ih_obj = struct.unpack("<I", rec_data[8:12])[0]
                 if ih_obj in fonts:
                     active_font = fonts[ih_obj]
 
-            # 3. Exclusão de Objeto: EMR_DELETEOBJECT (40)
+            # 5. Exclusão de Objeto: EMR_DELETEOBJECT (40)
             elif rec_type == 40 and len(rec_data) >= 12:
                 ih_obj = struct.unpack("<I", rec_data[8:12])[0]
                 fonts.pop(ih_obj, None)
 
-            # 4. Texto Extendido: EMR_EXTTEXTOUTA (83) e EMR_EXTTEXTOUTW (84)
+            # 6. Texto Extendido: EMR_EXTTEXTOUTA (83) e EMR_EXTTEXTOUTW (84)
             elif rec_type in (83, 84) and len(rec_data) >= 52:
-                bounds = struct.unpack("<4i", rec_data[8:24])
                 ref_x, ref_y = struct.unpack("<ii", rec_data[36:44])
                 n_chars, off_str = struct.unpack("<II", rec_data[44:52])
                 off_dx = struct.unpack("<I", rec_data[72:76])[0] if len(rec_data) >= 76 else 0
@@ -196,11 +253,8 @@ class QRPConverter:
 
                 if 0 < off_str < len(rec_data) and off_str + byte_len <= len(rec_data):
                     raw = rec_data[off_str:off_str + byte_len]
-                    text = raw.decode("utf-16le" if is_w else "cp1252", errors="replace").rstrip("\x00")
-                    if text.strip():
-                        b_left, b_top, b_right, b_bottom = bounds
-                        has_valid_bounds = (b_right > b_left and b_bottom > b_top)
-
+                    text = raw.decode("utf-16le" if is_w else "cp1252", errors="replace").replace("\r", "").replace("\n", "")
+                    if text and text.strip():
                         dx_w = 0
                         if off_dx > 0 and off_dx + n_chars * 4 <= len(rec_data):
                             try:
@@ -209,18 +263,41 @@ class QRPConverter:
                             except Exception:
                                 dx_w = 0
 
-                        left = b_left if has_valid_bounds else ref_x
-                        top = ref_y  # No QuickReport GDI, ref_y é a posição de linha da escrita
-                        h = (b_bottom - b_top) if has_valid_bounds else active_font.get("height", 14)
+                        font_h = active_font.get("height", 14)
+                        if dx_w <= 0:
+                            dx_w = len(text) * font_h * 0.55
 
-                        items.append({
-                            "text": text.strip(),
+                        # Ajuste de alinhamento horizontal (TA_LEFT, TA_RIGHT, TA_CENTER)
+                        if (active_text_align & 6) == 6:
+                            left = ref_x - (dx_w / 2.0)
+                        elif (active_text_align & 2) == 2:
+                            left = ref_x - dx_w
+                        else:
+                            left = ref_x
+
+                        # Ajuste de alinhamento vertical (TA_TOP, TA_BASELINE, TA_BOTTOM)
+                        if (active_text_align & 24) == 24:
+                            top_y = ref_y - (font_h * 0.70)
+                            base_y = ref_y
+                        elif (active_text_align & 8) == 8:
+                            top_y = ref_y - font_h
+                            base_y = ref_y - (font_h * 0.20)
+                        else:  # TA_TOP padrão Windows GDI (baseline visual exata em ~0.58)
+                            top_y = ref_y
+                            base_y = ref_y + (font_h * 0.58)
+
+                        raw_items.append({
+                            "text": text,
                             "left": left,
-                            "top": top,
-                            "h_logical": h
+                            "top": top_y,
+                            "baseline_logical": base_y,
+                            "w_logical": dx_w,
+                            "h_logical": font_h,
+                            "weight": active_font.get("weight", 400),
+                            "font_name": active_font.get("name", "Arial")
                         })
 
-            # 5. Texto Pequeno: EMR_SMALLTEXTOUT (108)
+            # 7. Texto Pequeno: EMR_SMALLTEXTOUT (108)
             elif rec_type == 108 and len(rec_data) >= 24:
                 x, y = struct.unpack("<ii", rec_data[8:16])
                 c_chars, fu_options = struct.unpack("<II", rec_data[16:24])
@@ -232,26 +309,40 @@ class QRPConverter:
 
                 if 0 < str_off < len(rec_data) and str_off + byte_len <= len(rec_data):
                     raw = rec_data[str_off:str_off + byte_len]
-                    text = raw.decode("cp1252" if is_small else "utf-16le", errors="replace").rstrip("\x00")
-                    if text.strip():
-                        if not has_no_rect and len(rec_data) >= 52:
-                            b_left, b_top, b_right, b_bottom = struct.unpack("<4i", rec_data[28:44])
-                            has_valid_bounds = (b_right > b_left and b_bottom > b_top)
+                    text = raw.decode("cp1252" if is_small else "utf-16le", errors="replace").replace("\r", "").replace("\n", "")
+                    if text and text.strip():
+                        font_h = active_font.get("height", 14)
+                        dx_w = len(text) * font_h * 0.55
+
+                        if (active_text_align & 6) == 6:
+                            left = x - (dx_w / 2.0)
+                        elif (active_text_align & 2) == 2:
+                            left = x - dx_w
                         else:
-                            has_valid_bounds = False
+                            left = x
 
-                        left = b_left if has_valid_bounds else x
-                        top = y
-                        h = (b_bottom - b_top) if has_valid_bounds else active_font.get("height", 14)
+                        if (active_text_align & 24) == 24:
+                            top_y = y - (font_h * 0.70)
+                            base_y = y
+                        elif (active_text_align & 8) == 8:
+                            top_y = y - font_h
+                            base_y = y - (font_h * 0.20)
+                        else:
+                            top_y = y
+                            base_y = y + (font_h * 0.58)
 
-                        items.append({
-                            "text": text.strip(),
+                        raw_items.append({
+                            "text": text,
                             "left": left,
-                            "top": top,
-                            "h_logical": h
+                            "top": top_y,
+                            "baseline_logical": base_y,
+                            "w_logical": dx_w,
+                            "h_logical": font_h,
+                            "weight": active_font.get("weight", 400),
+                            "font_name": active_font.get("name", "Arial")
                         })
 
-            # 6. Conjunto de Textos: EMR_POLYTEXTOUTA (85) e EMR_POLYTEXTOUTW (86)
+            # 8. Conjunto de Textos: EMR_POLYTEXTOUTA (85) e EMR_POLYTEXTOUTW (86)
             elif rec_type in (85, 86) and len(rec_data) >= 40:
                 c_strings = struct.unpack("<I", rec_data[36:40])[0]
                 is_w = (rec_type == 86)
@@ -262,24 +353,27 @@ class QRPConverter:
                         break
                     ref_x, ref_y = struct.unpack("<ii", rec_data[text_ptr:text_ptr + 8])
                     n_chars, off_str = struct.unpack("<II", rec_data[text_ptr + 8:text_ptr + 16])
-                    b_rect = struct.unpack("<4i", rec_data[text_ptr + 20:text_ptr + 36])
                     text_ptr += 40
                     byte_len = n_chars * char_size
                     if 0 < off_str < len(rec_data) and off_str + byte_len <= len(rec_data):
                         raw = rec_data[off_str:off_str + byte_len]
-                        text = raw.decode("utf-16le" if is_w else "cp1252", errors="replace").rstrip("\x00")
-                        if text.strip():
-                            has_valid_bounds = (b_rect[2] > b_rect[0] and b_rect[3] > b_rect[1])
-                            left = b_rect[0] if has_valid_bounds else ref_x
-                            top = b_rect[1] if has_valid_bounds else ref_y
-                            w = (b_rect[2] - b_rect[0]) if has_valid_bounds else 0
-                            h = (b_rect[3] - b_rect[1]) if has_valid_bounds else active_font.get("height", 14)
-                            items.append({
+                        text = raw.decode("utf-16le" if is_w else "cp1252", errors="replace").replace("\r", "").replace("\n", "")
+                        if text and text.strip():
+                            font_h = active_font.get("height", 14)
+                            dx_w = len(text) * font_h * 0.55
+                            left = ref_x
+                            top_y = ref_y
+                            base_y = ref_y + (font_h * 0.58)
+
+                            raw_items.append({
                                 "text": text,
                                 "left": left,
-                                "top": top,
-                                "w_logical": w,
-                                "h_logical": h
+                                "top": top_y,
+                                "baseline_logical": base_y,
+                                "w_logical": dx_w,
+                                "h_logical": font_h,
+                                "weight": active_font.get("weight", 400),
+                                "font_name": active_font.get("name", "Arial")
                             })
 
             elif rec_type == 14:  # EMR_EOF
@@ -287,9 +381,23 @@ class QRPConverter:
 
             pos += rec_size
 
-        # Ordena estritamente por linha vertical (de cima para baixo) e depois coluna (esquerda para direita)
-        items.sort(key=lambda it: (round(it["top"] / 8.0), it["left"]))
-        return (orig_w, orig_h), items
+        # Remove registros duplicados exatos sobrepostos (ex: negrito simulado no Delphi com deslocamento de 1-2px)
+        items: List[Dict[str, Any]] = []
+        for it in raw_items:
+            is_dup = False
+            for prev in items[-6:]:
+                if (
+                    prev["text"] == it["text"]
+                    and abs(prev["left"] - it["left"]) <= 2.5
+                    and abs(prev["top"] - it["top"]) <= 2.5
+                ):
+                    is_dup = True
+                    break
+            if not is_dup:
+                items.append(it)
+
+        return (logical_w, logical_h), items
+
 
     @staticmethod
     def render_emf_to_image(emf_bytes: bytes, dpi: int = 300) -> Image.Image:
@@ -394,16 +502,16 @@ class QRPConverter:
                 from reportlab.lib.utils import ImageReader
                 from reportlab.pdfbase import pdfmetrics
 
-                font_to_use = _ensure_reportlab_fonts()
+                _ensure_reportlab_fonts()
                 pdf_canvas = canvas.Canvas(output_pdf)
 
-                for img, text_items, (orig_w, orig_h) in page_entries:
+                for img, text_items, (logical_w, logical_h) in page_entries:
                     img_w, img_h = img.size
                     page_w_pt = (img_w / dpi) * 72.0
                     page_h_pt = (img_h / dpi) * 72.0
 
-                    scale_x = page_w_pt / max(1, orig_w)
-                    scale_y = page_h_pt / max(1, orig_h)
+                    scale_x = page_w_pt / max(1, logical_w)
+                    scale_y = page_h_pt / max(1, logical_h)
 
                     pdf_canvas.setPageSize((page_w_pt, page_h_pt))
                     # 1. Desenha a imagem de fundo em alta resolução (300 DPI)
@@ -411,34 +519,82 @@ class QRPConverter:
 
                     # 2. Desenha a camada de texto transparente/invisível (Modo 3 - Text Rendering Mode)
                     if text_items:
-                        text_obj = pdf_canvas.beginText()
-                        text_obj.setTextRenderMode(3)  # Modo 3: Invisível visualmente, 100% selecionável e copiável
-
+                        # Converte coordenadas para pontos de PDF (origem 0,0 no canto inferior esquerdo)
+                        processed_items = []
                         for it in text_items:
                             text_str = it["text"].rstrip("\r\n")
                             if not text_str.strip():
                                 continue
 
-                            # Posicionamento horizontal exato
-                            pdf_x = it["left"] * scale_x
+                            left_pt = it["left"] * scale_x
+                            w_pt = it["w_logical"] * scale_x
+                            top_pt = page_h_pt - (it["top"] * scale_y)
+                            baseline_pt = page_h_pt - (it["baseline_logical"] * scale_y)
+                            font_sz = max(6.0, min(72.0, it["h_logical"] * scale_y))
 
-                            # No QuickReport, it["top"] (ref_y) é a linha de base original do texto
-                            pdf_baseline_y = page_h_pt - (it["top"] * scale_y) - 2.5
+                            processed_items.append({
+                                "text": text_str,
+                                "left_pt": left_pt,
+                                "w_pt": w_pt,
+                                "top_pt": top_pt,
+                                "baseline_pt": baseline_pt,
+                                "font_sz": font_sz,
+                                "weight": it.get("weight", 400),
+                                "font_name": it.get("font_name", "Arial")
+                            })
 
-                            # Determina o tamanho tipográfico proporcional para abraçar o texto com exatidão
-                            h_pt = it["h_logical"] * scale_y
-                            if h_pt >= 20:
-                                font_sz = 15.0  # Títulos destacados
-                            elif h_pt <= 12:
-                                font_sz = 8.0   # Rodapés, notas e identificadores pequenos
-                            else:
-                                font_sz = 10.0  # Corpo principal do relatório (9-10 pt)
+                        if processed_items:
+                            # Agrupamento inteligente por linhas visuais (evita quebras de linha artificiais entre palavras)
+                            processed_items.sort(key=lambda it: (-it["top_pt"], it["left_pt"]))
+                            lines: List[List[Dict[str, Any]]] = []
+                            curr_line: List[Dict[str, Any]] = []
+                            line_top_pt = 0.0
 
-                            text_obj.setFont(font_to_use, font_sz)
-                            text_obj.setTextOrigin(pdf_x, pdf_baseline_y)
-                            text_obj.textLine(text_str)
+                            for it in processed_items:
+                                it_h = max(it["font_sz"], 8.0)
+                                if not curr_line:
+                                    curr_line = [it]
+                                    line_top_pt = it["top_pt"]
+                                else:
+                                    tol = max(3.5, it_h * 0.45)
+                                    if abs(it["top_pt"] - line_top_pt) <= tol:
+                                        curr_line.append(it)
+                                    else:
+                                        lines.append(curr_line)
+                                        curr_line = [it]
+                                        line_top_pt = it["top_pt"]
 
-                        pdf_canvas.drawText(text_obj)
+                            if curr_line:
+                                lines.append(curr_line)
+
+                            text_obj = pdf_canvas.beginText()
+                            text_obj.setTextRenderMode(3)  # Modo 3: Invisível visualmente, 100% selecionável e copiável
+
+                            for line in lines:
+                                line.sort(key=lambda it: it["left_pt"])
+                                line_baseline = sum(it["baseline_pt"] for it in line) / len(line)
+
+                                for it in line:
+                                    fn = _get_font_name(it["weight"])
+                                    font_sz = it["font_sz"]
+
+                                    try:
+                                        exp_w = pdfmetrics.stringWidth(it["text"], fn, font_sz)
+                                    except Exception:
+                                        exp_w = 0.0
+
+                                    horiz_scale = 100.0
+                                    if exp_w > 0.0 and it["w_pt"] > 0.0:
+                                        horiz_scale = max(50.0, min(200.0, (it["w_pt"] / exp_w) * 100.0))
+
+                                    text_obj.setFont(fn, font_sz)
+                                    text_obj.setHorizScale(horiz_scale)
+                                    text_obj.setTextOrigin(it["left_pt"], line_baseline)
+                                    text_obj.textOut(it["text"])
+
+                                text_obj.textLine()  # Quebra de linha exclusiva para troca de linha visual
+
+                            pdf_canvas.drawText(text_obj)
 
                     pdf_canvas.showPage()
 

@@ -20,6 +20,7 @@ dist/
 *.wmf
 *.qrp
 *.QRP
+*.pdf
 test_out.pdf
 multipage_test.pdf
 
