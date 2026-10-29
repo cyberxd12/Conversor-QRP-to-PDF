@@ -4,6 +4,16 @@ Sistema desktop moderno desenvolvido com **CustomTkinter** e Python para convers
 
 ---
 
+## 📥 Download do Executável Pronto (.exe)
+
+Não precisa instalar o Python! Você pode baixar a versão já compilada para Windows diretamente na página de Releases:
+
+👉 **[Baixar ConversorQRP.exe (atualizado)](https://github.com/cyberxd12/Conversor-QRP-to-PDF/releases/tag/v1.0.0)**
+
+Basta baixar o arquivo `.exe` e executar.
+
+---
+
 ## ✨ Principais Funcionalidades
 
 - **Salvamento Automático na Pasta de Origem**: Cada arquivo PDF gerado é gravado exatamente no mesmo diretório do arquivo `.QRP` correspondente.
@@ -40,12 +50,15 @@ python main.py
 
 ---
 
----
-
 ## 📦 Como Gerar o Executável Standalone (.exe)
 
+Caso queira compilar o executável por conta própria:
+
 ### Opção 1: Compilação Local
-Dê um duplo clique no script [compilar_executavel.bat](file:///c:/Users/luis.suporte/Documents/programação/conversor/compilar_executavel.bat). O arquivo será gerado em `dist\ConversorQRP.exe`.
+Dê um duplo clique no script `compilar_executavel.bat`. O arquivo será gerado em `dist\ConversorQRP.exe`.
+
+### Opção 2: Versão Pré-Compilada (GitHub Releases)
+O executável já compilado está disponível em: [Git Release](https://github.com/cyberxd12/Conversor-QRP-to-PDF/releases/tag/v1.0.0).
 
 ---
 
